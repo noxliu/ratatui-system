@@ -826,14 +826,15 @@ impl App {
     // }
 
     fn draw(&mut self, frame: &mut Frame) {
-        let vertical = &Layout::vertical([Constraint::Min(8), Constraint::Length(4)]);
+        let vertical = &Layout::vertical([Constraint::Length(4), Constraint::Min(8), Constraint::Length(4)]);
         let rects = vertical.split(frame.area());
 
         self.set_colors();
 
-        self.render_table(frame, rects[0]);
-        self.render_scrollbar(frame, rects[0]);
-        self.render_footer(frame, rects[1]);
+        self.render_header(frame, rects[0]);
+        self.render_table(frame, rects[1]);
+        self.render_scrollbar(frame, rects[1]);
+        self.render_footer(frame, rects[2]);
 
         let input = Paragraph::new(self.input.as_str())
             .style(match self.input_mode {
@@ -968,6 +969,22 @@ impl App {
     }
 
     fn render_footer(&self, frame: &mut Frame, area: Rect) {
+        let info_footer = Paragraph::new(Text::from_iter(INFO_TEXT))
+            .style(
+                Style::new()
+                    .fg(self.colors.row_fg)
+                    .bg(self.colors.buffer_bg),
+            )
+            .centered()
+            .block(
+                Block::bordered()
+                    .border_type(BorderType::Double)
+                    .border_style(Style::new().fg(self.colors.footer_border_color)),
+            );
+        frame.render_widget(info_footer, area);
+    }
+
+    fn render_header(&self, frame: &mut Frame, area: Rect) {
         let info_footer = Paragraph::new(Text::from_iter(INFO_TEXT))
             .style(
                 Style::new()
