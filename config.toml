@@ -1,0 +1,6 @@
+db_server = "db.server.com"
+db_port = 3306
+db_user = "root"
+db_password = "password"
+db_name= "moonpump"
+enable_logging = true    
