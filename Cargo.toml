@@ -1,19 +1,29 @@
 [package]
-edition = "2024"
-name = "ratatui-x-table"
+edition = "2021"
+name = "x-tool"
 version = "0.1.0"
 
 [dependencies]
-clap = {version = "4", features = ["cargo"]}
+clap = { version = "4", features = ["cargo"] }
 crossterm = "0.28.1"
 itertools = "0.14.0"
 ratatui = "0.29.0"
 thiserror = "2.0.12"
-tokio = {version = "1", features = ["full"]}
+tokio = { version = "1", features = ["full"] }
 unicode-width = "0.2.0"
-#palette = "0.7.3"
 fakeit = "1.1"
 color-eyre = "0.6.3"
+sqlx = { version = "0.8.3", features = ["mysql", "runtime-tokio-native-tls"] }
+confy = "0.5"
+reqwest = { version = "0.11", features = ["json"] }
+env_logger = "0.11.6"
+log = "0.4.26"
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+lazy_static = "1.5.0"
+futures = "0.3.31"
+log4rs = "1.0"
+rust_decimal = "1.36.0"
 
 [dev-dependencies]
 anyhow = "1"
