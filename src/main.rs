@@ -10,7 +10,10 @@ use color_eyre::{
     owo_colors::{colors::xterm::Corn, OwoColorize},
     Result,
 };
-use crossterm::event::{KeyEvent, KeyModifiers};
+use crossterm::{
+    cursor::Show,
+    event::{KeyEvent, KeyModifiers},
+};
 use itertools::Itertools;
 use ratatui::{
     crossterm::event::{self, Event, KeyCode, KeyEventKind},
@@ -245,7 +248,9 @@ async fn main() -> Result<()> {
                                 };
                             }
 
-                            KeyCode::Char('q') => return Ok(()),
+                            KeyCode::Char('q') => {
+                                let _ = app.exit_program();
+                            }
 
 
                             KeyCode::Down => match app.focus_area {
@@ -300,8 +305,8 @@ async fn main() -> Result<()> {
         terminal.draw(|frame| app.draw(frame))?;
     }
 
-    // ratatui::restore();
-    // Ok(())
+    ratatui::restore();
+    Ok(())
     // app_result
 }
 struct TableColors {
@@ -688,6 +693,20 @@ impl App {
 
     pub fn refresh_dex_data(&mut self, data: Vec<DexVolumeTask>) {
         self.dex_items = data;
+    }
+
+    pub fn exit_program(&mut self) -> Result<()> {
+        ratatui::restore();
+        // std::process::exit(0);
+        crossterm::execute!(
+            std::io::stdout(),
+            crossterm::terminal::LeaveAlternateScreen,
+            // crossterm::terminal::disable_raw_mode(),
+            Show // 显示光标
+        )?;
+
+        crossterm::terminal::disable_raw_mode()?;
+        std::process::exit(0);
     }
 
     pub fn next_row(&mut self) {
