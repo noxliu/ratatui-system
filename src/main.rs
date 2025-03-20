@@ -6,17 +6,21 @@ use sqlx::{MySql, MySqlPool, Pool};
 use std::{env, fmt::format, path::Path, str::FromStr, sync::Mutex, time::Duration};
 use tokio::sync::mpsc;
 
-use color_eyre::Result;
+use color_eyre::{
+    owo_colors::{colors::xterm::Corn, OwoColorize},
+    Result,
+};
 use crossterm::event::{KeyEvent, KeyModifiers};
 use itertools::Itertools;
 use ratatui::{
     crossterm::event::{self, Event, KeyCode, KeyEventKind},
     layout::{Constraint, Flex, Layout, Margin, Position, Rect},
     style::{self, Color, Modifier, Style, Stylize},
+    symbols::border,
     text::{Line, Span, Text},
     widgets::{
-        Block, BorderType, Cell, Clear, HighlightSpacing, Paragraph, Row, Scrollbar,
-        ScrollbarOrientation, ScrollbarState, Table, TableState,
+        Block, BorderType, Borders, Cell, Clear, HighlightSpacing, Padding, Paragraph, Row,
+        Scrollbar, ScrollbarOrientation, ScrollbarState, Table, TableState, Wrap,
     },
     DefaultTerminal, Frame,
 };
@@ -24,11 +28,10 @@ use serde::{Deserialize, Serialize};
 use style::palette::tailwind;
 use unicode_width::UnicodeWidthStr;
 
-use std::sync::Arc;
 use tokio::{sync::RwLock, time::sleep};
 
 mod db;
-use db::dbutils::{Database, MmVolumeTask};
+use db::dbutils::{Database, DexVolumeTask, MmVolumeTask};
 // use db::dbutils::Database::get_all_users;
 use futures::{executor::block_on, future::ok};
 use log4rs;
@@ -40,17 +43,23 @@ const PALETTES: [tailwind::Palette; 4] = [
     tailwind::RED,
 ];
 const INFO_TEXT: [&str; 2] = [
-    "(Esc) quit | (↑) move up | (↓) move down | (←) move left | (→) move right",
+    "(Q) quit | (Tab) Switch work space | (↑) move up | (↓) move down | (←) move left | (→) move right",
     "(Shift + →) next color | (Shift + ←) previous color",
 ];
 
 const ITEM_HEIGHT: usize = 4;
 
-// 定义全局变量为一个包含 MyStruct 的数组
 lazy_static! {
-    static ref GLOBAL_ARRAY: Mutex<Vec<MmVolumeTask>> = Mutex::new(vec![]);
+    static ref GLOBAL_MM_ARRAY: Mutex<Vec<MmVolumeTask>> = Mutex::new(vec![]);
 }
 
+lazy_static! {
+    static ref GLOBAL_DEX_ARRAY: Mutex<Vec<DexVolumeTask>> = Mutex::new(vec![]);
+}
+
+lazy_static! {
+    static ref SEARCH_KEY_WORD: Mutex<String> = Mutex::new("".to_string());
+}
 // static GLOBAL_DATA = new vec();
 
 #[derive(Serialize, Deserialize, Debug)]
@@ -110,20 +119,24 @@ async fn main() -> Result<()> {
         "mysql://{}:{}@{}:{}/{}",
         config.db_user, config.db_password, config.db_server, config.db_port, config.db_name
     );
-    let db = Database::new(&db_url).await.unwrap();
+    let db: Database = Database::new(&db_url).await.unwrap();
 
-    let mm_volumes: &Vec<MmVolumeTask> = &db.get_all_mm_volume_task().await.unwrap();
+    let db1: Database = Database::new(&db_url).await.unwrap();
+
+    let mm_volumes: &Vec<MmVolumeTask> = &db.get_all_mm_volume_task("").await.unwrap();
     {
         let mut _datas: Vec<MmVolumeTask> = vec![];
-        let mut array = GLOBAL_ARRAY.lock().unwrap();
+        let mut array = GLOBAL_MM_ARRAY.lock().unwrap();
         for _temp in mm_volumes {
-            // let _data = Data {
-            //     key: _user.accountId.to_string(),
-            //     address: _user.userName.clone(),
-            //     email: _user.realName.clone(),
-            //     col2: _user.password.clone(),
-            //     col3: _user.phoneNumber.clone(),
-            // };
+            array.push(_temp.clone());
+        }
+    }
+
+    let dex_volumes: &Vec<DexVolumeTask> = &db.get_all_dex_volume_task("").await.unwrap();
+    {
+        let mut _datas: Vec<DexVolumeTask> = vec![];
+        let mut array = GLOBAL_DEX_ARRAY.lock().unwrap();
+        for _temp in dex_volumes {
             array.push(_temp.clone());
         }
     }
@@ -133,25 +146,26 @@ async fn main() -> Result<()> {
     let mut app = App::new();
 
     let (tx, mut rx) = mpsc::channel(32);
+    let (tx1, mut rx1) = mpsc::channel(32);
 
     tokio::spawn(async move {
         loop {
-            match db.get_all_mm_volume_task().await {
+            let key_word;
+
+            {
+                let _key_word: std::sync::MutexGuard<'_, String> = SEARCH_KEY_WORD.lock().unwrap();
+                key_word = _key_word.clone();
+            }
+
+            match db.get_all_mm_volume_task(&key_word).await {
                 Ok(tasks) => {
                     let mut datas = Vec::new();
                     for _temp in tasks {
-                        // let data = Data {
-                        //     key: user.accountId.to_string(),
-                        //     address: user.userName.clone(),
-                        //     email: user.realName.clone(),
-                        //     col2: user.password.clone(),
-                        //     col3: user.phoneNumber.clone(),
-                        // };
                         datas.push(_temp);
                     }
 
                     {
-                        let mut array = GLOBAL_ARRAY.lock().unwrap();
+                        let mut array = GLOBAL_MM_ARRAY.lock().unwrap();
                         *array = datas.clone();
                     }
 
@@ -166,10 +180,47 @@ async fn main() -> Result<()> {
         }
     });
 
+    tokio::spawn(async move {
+        loop {
+            sleep(Duration::from_secs(5)).await;
+            let key_word;
+
+            {
+                let _key_word = SEARCH_KEY_WORD.lock().unwrap();
+                key_word = _key_word.clone();
+            }
+
+            match db1.get_all_dex_volume_task(&key_word).await {
+                Ok(tasks) => {
+                    let mut datas = Vec::new();
+                    for _temp in tasks {
+                        datas.push(_temp);
+                    }
+
+                    {
+                        let mut array = GLOBAL_DEX_ARRAY.lock().unwrap();
+                        *array = datas.clone();
+                    }
+
+                    if tx1.send(datas).await.is_err() {
+                        break;
+                    }
+                }
+                Err(e) => eprintln!("Failed to fetch data: {:?}", e),
+            }
+
+            sleep(Duration::from_secs(5)).await;
+        }
+    });
+
     loop {
         tokio::select! {
-            Some(data) = rx.recv() => {
-                app.refresh_data(data);
+            Some(mm_data) = rx.recv() => {
+                app.refresh_mm_data(mm_data);
+            }
+
+            Some(dex_data) = rx1.recv() => {
+                app.refresh_dex_data(dex_data);
             }
 
             result = async {
@@ -186,17 +237,48 @@ async fn main() -> Result<()> {
 
                     match app.input_mode {
                         InputMode::Normal => match key.code {
-                            KeyCode::Char('q') | KeyCode::Esc => return Ok(()),
-                            KeyCode::Char('j') | KeyCode::Down => app.next_row(),
-                            KeyCode::Char('k') | KeyCode::Up => app.previous_row(),
-                            KeyCode::Char('l') | KeyCode::Right if shift_pressed => app.next_color(),
+
+                            KeyCode::Tab => {
+                                app.focus_area = match app.focus_area {
+                                    FocusArea::Upper => FocusArea::Lower,
+                                    FocusArea::Lower => FocusArea::Upper,
+                                };
+                            }
+
+                            KeyCode::Char('q') => return Ok(()),
+
+
+                            KeyCode::Down => match app.focus_area {
+                                FocusArea::Lower => app.next_row(),
+                                _ => {},
+                            },
+
+                            KeyCode::Up => match app.focus_area {
+                                FocusArea::Lower => app.previous_row(),
+                                _ => {},
+                            },
+
+                            KeyCode::Right if shift_pressed => app.next_color(),
                             KeyCode::Left if shift_pressed => {
                                 app.previous_color();
                             }
-                            KeyCode::Char('l') | KeyCode::Right => app.next_column(),
-                            // KeyCode::Char('h') | KeyCode::Left => self.previous_column(),
-                            KeyCode::Left => app.previous_column(),
-                            KeyCode::Char('e') | KeyCode::Enter => app.edit_cell(),
+
+                            KeyCode::Right => match app.focus_area {
+                                FocusArea::Upper => app.next_column_header(),
+                                FocusArea::Lower => app.next_column(),
+                            },
+
+                            KeyCode::Left => match app.focus_area {
+                                FocusArea::Upper => app.previous_column_header(),
+                                FocusArea::Lower => app.previous_column(),
+                            },
+
+                            KeyCode::Enter => match app.focus_area {
+                                FocusArea::Lower => app.edit_cell(),
+                                FocusArea::Upper => app.edit_search(),
+                            },
+
+                            // KeyCode::Enter => app.edit_cell(),
                             _ => {}
                         },
                         InputMode::Editing if key.kind == KeyEventKind::Press => match key.code {
@@ -204,7 +286,7 @@ async fn main() -> Result<()> {
                             KeyCode::Char(to_insert) => app.enter_char(to_insert),
                             KeyCode::Backspace => app.delete_char(),
                             KeyCode::Left => app.move_cursor_left(),
-                            KeyCode::Right => app.move_cursor_right(),
+                            KeyCode::Right  => app.move_cursor_right(),
                             KeyCode::Esc => app.cancel_edit(),
                             _ => {}
                         },
@@ -218,8 +300,8 @@ async fn main() -> Result<()> {
         terminal.draw(|frame| app.draw(frame))?;
     }
 
-    ratatui::restore();
-    Ok(())
+    // ratatui::restore();
+    // Ok(())
     // app_result
 }
 struct TableColors {
@@ -270,7 +352,7 @@ struct SelectedCell {
 }
 
 impl MmVolumeTask {
-    const fn ref_array(&self) -> [&String; 14] {
+    const fn ref_array(&self) -> [&String; 19] {
         [
             &self.id,
             &self.launch_id,
@@ -286,6 +368,11 @@ impl MmVolumeTask {
             &self.frequent_low,
             &self.frequent_high,
             &self.real_sol,
+            &self.create_time,
+            &self.update_time,
+            &self.col1,
+            &self.col2,
+            &self.col3,
         ]
     }
 
@@ -344,6 +431,120 @@ impl MmVolumeTask {
     fn real_sol(&self) -> &str {
         &self.real_sol
     }
+
+    fn create_time(&self) -> &str {
+        &self.create_time
+    }
+
+    fn update_time(&self) -> &str {
+        &self.update_time
+    }
+
+    // fn col(&self) -> &str {
+    //     &self.col
+    // }
+}
+
+impl DexVolumeTask {
+    const fn ref_array(&self) -> [&String; 19] {
+        [
+            &self.id,
+            &self.pool_id,
+            &self.token_add,
+            &self.mm_type,
+            &self.remark,
+            &self.target_price,
+            &self.stop_price_per,
+            &self.do_status,
+            &self.buy_rate,
+            &self.buy_per_low,
+            &self.buy_per_high,
+            &self.sell_percent,
+            &self.frequent_low,
+            &self.frequent_high,
+            &self.bsdiff,
+            &self.create_time,
+            &self.update_time,
+            &self.copy,
+            &self.del,
+        ]
+    }
+
+    fn id(&self) -> &str {
+        &self.id
+    }
+
+    fn pool_id(&self) -> &str {
+        &self.pool_id
+    }
+
+    fn token_add(&self) -> &str {
+        &self.token_add
+    }
+
+    fn mm_type(&self) -> &str {
+        &self.mm_type
+    }
+
+    fn remark(&self) -> &str {
+        &self.remark
+    }
+
+    fn target_price(&self) -> &str {
+        &self.target_price
+    }
+
+    fn stop_price_per(&self) -> &str {
+        &self.stop_price_per
+    }
+
+    fn do_status(&self) -> &str {
+        &self.do_status
+    }
+
+    fn buy_rate(&self) -> &str {
+        &self.buy_rate
+    }
+
+    fn buy_per_low(&self) -> &str {
+        &self.buy_per_low
+    }
+
+    fn buy_per_high(&self) -> &str {
+        &self.buy_per_high
+    }
+
+    fn sell_percent(&self) -> &str {
+        &self.sell_percent
+    }
+
+    fn frequent_low(&self) -> &str {
+        &self.frequent_low
+    }
+
+    fn frequent_high(&self) -> &str {
+        &self.frequent_high
+    }
+
+    fn bsdiff(&self) -> &str {
+        &self.bsdiff
+    }
+
+    fn create_time(&self) -> &str {
+        &self.create_time
+    }
+
+    fn update_time(&self) -> &str {
+        &self.update_time
+    }
+
+    fn copy(&self) -> &str {
+        &self.copy
+    }
+
+    fn del(&self) -> &str {
+        &self.del
+    }
 }
 
 #[derive(PartialEq)]
@@ -354,8 +555,14 @@ enum InputMode {
 
 struct App {
     state: TableState,
-    items: Vec<MmVolumeTask>,
-    longest_item_lens: (
+    mm_items: Vec<MmVolumeTask>,
+    dex_items: Vec<DexVolumeTask>,
+    longest_mm_item_lens: (
+        u16,
+        u16,
+        u16,
+        u16,
+        u16,
         u16,
         u16,
         u16,
@@ -371,6 +578,27 @@ struct App {
         u16,
         u16,
     ), // order is (name, address, email)
+    longest_dex_item_lens: (
+        u16,
+        u16,
+        u16,
+        u16,
+        u16,
+        u16,
+        u16,
+        u16,
+        u16,
+        u16,
+        u16,
+        u16,
+        u16,
+        u16,
+        u16,
+        u16,
+        u16,
+        u16,
+        u16,
+    ), // order is
     scroll_state: ScrollbarState,
     colors: TableColors,
     color_index: usize,
@@ -381,6 +609,24 @@ struct App {
     editing_key: String,
     editing_key_value: String,
     editing_column: String,
+    focus_area: FocusArea,
+    header_item_selected_index: u8,
+    header_item_max_index: u8,
+    search_word: String,
+    search_word_character_index: usize,
+    working_data: WorkingData,
+}
+
+#[derive(PartialEq, Debug)]
+enum FocusArea {
+    Upper,
+    Lower,
+}
+
+#[derive(PartialEq, Debug)]
+enum WorkingData {
+    Mm,
+    Dex,
 }
 
 /// helper function to create a centered rect using up certain percentage of the available rect `r`
@@ -394,18 +640,31 @@ fn popup_area(area: Rect, percent_x: u16, percent_y: u16) -> Rect {
 
 impl App {
     fn new() -> Self {
-        let array: std::sync::MutexGuard<'_, Vec<MmVolumeTask>> = GLOBAL_ARRAY.lock().unwrap();
-        let data_vec = array.clone();
+        let mm_array: std::sync::MutexGuard<'_, Vec<MmVolumeTask>> =
+            GLOBAL_MM_ARRAY.lock().unwrap();
+        let mm_data_vec = mm_array.clone();
 
-        info!("data_vec {:?} ", data_vec);
+        let dex_array: std::sync::MutexGuard<'_, Vec<DexVolumeTask>> =
+            GLOBAL_DEX_ARRAY.lock().unwrap();
+        let dex_data_vec = dex_array.clone();
+
+        info!("data_vec {:?} ", mm_data_vec);
 
         Self {
             state: TableState::default().with_selected(0),
-            longest_item_lens: constraint_len_calculator(&data_vec),
-            scroll_state: ScrollbarState::new((data_vec.len() - 1) * ITEM_HEIGHT),
+            longest_mm_item_lens: constraint_mm_len_calculator(&mm_data_vec),
+            longest_dex_item_lens: constraint_dex_len_calculator(&dex_data_vec),
+            scroll_state: ScrollbarState::new(
+                (if mm_data_vec.len() > 1 {
+                    mm_data_vec.len() - 1
+                } else {
+                    0
+                }) * ITEM_HEIGHT,
+            ),
             colors: TableColors::new(&PALETTES[0]),
             color_index: 0,
-            items: data_vec,
+            mm_items: mm_data_vec,
+            dex_items: dex_data_vec,
             show_popup: false,
             input: String::new(),
             input_mode: InputMode::Normal,
@@ -413,17 +672,33 @@ impl App {
             editing_key: String::new(),
             editing_key_value: String::new(),
             editing_column: String::new(),
+            focus_area: FocusArea::Lower,
+            header_item_selected_index: 0,
+            header_item_max_index: 1,
+            // search_input_mode: InputMode::Normal,
+            search_word: String::new(),
+            search_word_character_index: 0,
+            working_data: WorkingData::Mm,
         }
     }
 
-    pub fn refresh_data(&mut self, data: Vec<MmVolumeTask>) {
-        self.items = data;
+    pub fn refresh_mm_data(&mut self, data: Vec<MmVolumeTask>) {
+        self.mm_items = data;
+    }
+
+    pub fn refresh_dex_data(&mut self, data: Vec<DexVolumeTask>) {
+        self.dex_items = data;
     }
 
     pub fn next_row(&mut self) {
         let i = match self.state.selected() {
             Some(i) => {
-                if i >= self.items.len() - 1 {
+                let row_length = match self.working_data {
+                    WorkingData::Mm => self.mm_items.len(),
+                    WorkingData::Dex => self.dex_items.len(),
+                };
+
+                if i >= row_length - 1 {
                     0
                 } else {
                     i + 1
@@ -431,6 +706,7 @@ impl App {
             }
             None => 0,
         };
+
         self.state.select(Some(i));
         self.scroll_state = self.scroll_state.position(i * ITEM_HEIGHT);
     }
@@ -438,8 +714,13 @@ impl App {
     pub fn previous_row(&mut self) {
         let i = match self.state.selected() {
             Some(i) => {
+                let row_length = match self.working_data {
+                    WorkingData::Mm => self.mm_items.len(),
+                    WorkingData::Dex => self.dex_items.len(),
+                };
+
                 if i == 0 {
-                    self.items.len() - 1
+                    row_length - 1
                 } else {
                     i - 1
                 }
@@ -458,27 +739,126 @@ impl App {
         self.state.select_previous_column();
     }
 
+    pub fn next_column_header(&mut self) {
+        if self.header_item_selected_index < self.header_item_max_index {
+            self.header_item_selected_index += 1;
+        }
+    }
+
+    pub fn previous_column_header(&mut self) {
+        if self.header_item_selected_index > 0 {
+            self.header_item_selected_index -= 1;
+        }
+    }
+
     pub fn edit_cell(&mut self) {
         let mut can_edit = true;
 
         if let Some(content) = self.get_current_cell_content() {
-            info!("{:?}", content);
+            // info!("{:?}", content);
             self.input = content.cell_value.to_owned();
             self.editing_key = content.key_name;
             self.editing_key_value = content.key_value;
             self.editing_column = content.cell_name.clone();
 
-            if content.cell_name.eq("id") {
+            if content.cell_name.eq("id") || content.cell_name.eq("col") {
                 can_edit = false;
             }
         }
-
-        info!("can edit :  {}", can_edit);
 
         if can_edit {
             self.show_popup = !self.show_popup;
             self.input_mode = InputMode::Editing;
         }
+    }
+
+    pub fn edit_search(&mut self) {
+        match self.header_item_selected_index {
+            0 => {
+                self.input_mode = InputMode::Editing;
+            }
+            1 => {
+                // info!("key : {}", self.header_item_max_index);
+                match self.working_data {
+                    WorkingData::Mm => {
+                        self.working_data = WorkingData::Dex;
+                        self.search_word = "".to_string();
+                        {
+                            let mut _key_word = SEARCH_KEY_WORD.lock().unwrap();
+                            *_key_word = "".to_string();
+                        }
+
+                        block_on(async {
+                            let config: Config = load_config();
+
+                            let db_url = format!(
+                                "mysql://{}:{}@{}:{}/{}",
+                                config.db_user,
+                                config.db_password,
+                                config.db_server,
+                                config.db_port,
+                                config.db_name
+                            );
+                            let db1 = Database::new(&db_url).await.unwrap();
+
+                            let dex_tasks: Vec<DexVolumeTask> = db1
+                                .get_all_dex_volume_task(&self.search_word)
+                                .await
+                                .unwrap();
+                            let mut _datas: Vec<DexVolumeTask> = vec![];
+                            // let mut array = GLOBAL_ARRAY.lock().unwrap();
+                            for _temp in dex_tasks {
+                                _datas.push(_temp);
+                            }
+
+                            self.dex_items = _datas;
+                        });
+
+                        self.longest_dex_item_lens = constraint_dex_len_calculator(&self.dex_items);
+                        self.focus_area = FocusArea::Lower;
+                    }
+                    WorkingData::Dex => {
+                        self.working_data = WorkingData::Mm;
+
+                        self.search_word = "".to_string();
+
+                        block_on(async {
+                            let config: Config = load_config();
+
+                            let db_url = format!(
+                                "mysql://{}:{}@{}:{}/{}",
+                                config.db_user,
+                                config.db_password,
+                                config.db_server,
+                                config.db_port,
+                                config.db_name
+                            );
+                            let db1 = Database::new(&db_url).await.unwrap();
+
+                            let mm_tasks: Vec<MmVolumeTask> =
+                                db1.get_all_mm_volume_task(&self.search_word).await.unwrap();
+                            let mut _datas: Vec<MmVolumeTask> = vec![];
+                            // let mut array = GLOBAL_ARRAY.lock().unwrap();
+                            for _temp in mm_tasks {
+                                _datas.push(_temp);
+                            }
+
+                            self.mm_items = _datas;
+                        });
+
+                        self.longest_mm_item_lens = constraint_mm_len_calculator(&self.mm_items);
+                        // self.scroll_state =
+                        //     ScrollbarState::new((&self.mm_items.len() - 1) * ITEM_HEIGHT);
+                        self.focus_area = FocusArea::Lower;
+                    }
+                }
+            }
+            _ => {}
+        }
+
+        // if self.header_item_selected_index == 0 {
+        //     self.input_mode = InputMode::Editing;
+        // }
     }
 
     pub fn next_color(&mut self) {
@@ -499,7 +879,7 @@ impl App {
 
         let is_num = is_numeric(&self.input.clone());
 
-        info!("{} is_num {}", &self.input.clone(), is_num);
+        // info!("{} is_num {}", &self.input.clone(), is_num);
 
         let mut data_valid = true;
 
@@ -548,12 +928,22 @@ impl App {
             data_valid = false;
         }
 
-        if data_valid {
-            self.reset_cursor();
-            self.input_mode = InputMode::Normal;
-            self.show_popup = false;
+        if self.editing_column.clone().eq("copy") {
+            data_valid = false;
+        }
 
-            // ------- ugly code start
+        if self.editing_column.clone().eq("del") {
+            data_valid = false;
+        }
+
+        if self.focus_area == FocusArea::Upper && self.header_item_selected_index == 0 {
+            // submit search word
+
+            {
+                let mut _key_word = SEARCH_KEY_WORD.lock().unwrap();
+                *_key_word = self.search_word.clone();
+            }
+
             block_on(async {
                 let config: Config = load_config();
 
@@ -566,27 +956,139 @@ impl App {
                     config.db_name
                 );
                 let db1 = Database::new(&db_url).await.unwrap();
-                info!(" self.editing_key : {} ", self.editing_key);
-                db1.update_record(
-                    &self.editing_key,
-                    &self.editing_key_value,
-                    &self.editing_column,
-                    &self.input.clone(),
-                )
-                .await
-                .unwrap();
 
-                let mm_tasks = db1.get_all_mm_volume_task().await.unwrap();
-                let mut _datas: Vec<MmVolumeTask> = vec![];
-                // let mut array = GLOBAL_ARRAY.lock().unwrap();
-                for _temp in mm_tasks {
-                    _datas.push(_temp);
+                if self.working_data == WorkingData::Mm {
+                    let mm_tasks: Vec<MmVolumeTask> =
+                        db1.get_all_mm_volume_task(&self.search_word).await.unwrap();
+                    let mut _datas: Vec<MmVolumeTask> = vec![];
+                    // let mut array = GLOBAL_ARRAY.lock().unwrap();
+                    for _temp in mm_tasks {
+                        _datas.push(_temp);
+                    }
+
+                    self.mm_items = _datas;
+                } else {
+                    let dex_tasks: Vec<DexVolumeTask> = db1
+                        .get_all_dex_volume_task(&self.search_word)
+                        .await
+                        .unwrap();
+                    let mut _datas: Vec<DexVolumeTask> = vec![];
+                    // let mut array = GLOBAL_ARRAY.lock().unwrap();
+                    for _temp in dex_tasks {
+                        _datas.push(_temp);
+                    }
+
+                    self.dex_items = _datas;
                 }
-
-                self.items = _datas;
             });
 
-            self.input.clear();
+            self.focus_area = FocusArea::Lower;
+            self.input_mode = InputMode::Normal;
+        } else {
+            if data_valid {
+                self.reset_cursor();
+                self.input_mode = InputMode::Normal;
+                self.show_popup = false;
+
+                // ------- ugly code start
+                block_on(async {
+                    let config: Config = load_config();
+
+                    let db_url = format!(
+                        "mysql://{}:{}@{}:{}/{}",
+                        config.db_user,
+                        config.db_password,
+                        config.db_server,
+                        config.db_port,
+                        config.db_name
+                    );
+                    let db1 = Database::new(&db_url).await.unwrap();
+                    info!(" update record : {} ", self.editing_key_value);
+                    db1.update_record(
+                        &self.editing_key,
+                        &self.editing_key_value,
+                        &self.editing_column,
+                        &self.input.clone(),
+                    )
+                    .await
+                    .unwrap();
+
+                    if self.working_data == WorkingData::Mm {
+                        let mm_tasks: Vec<MmVolumeTask> =
+                            db1.get_all_mm_volume_task(&self.search_word).await.unwrap();
+                        let mut _datas: Vec<MmVolumeTask> = vec![];
+                        // let mut array = GLOBAL_ARRAY.lock().unwrap();
+                        for _temp in mm_tasks {
+                            _datas.push(_temp);
+                        }
+
+                        self.mm_items = _datas;
+                    } else {
+                        let dex_tasks: Vec<DexVolumeTask> = db1
+                            .get_all_dex_volume_task(&self.search_word)
+                            .await
+                            .unwrap();
+                        let mut _datas: Vec<DexVolumeTask> = vec![];
+                        // let mut array = GLOBAL_ARRAY.lock().unwrap();
+                        for _temp in dex_tasks {
+                            _datas.push(_temp);
+                        }
+
+                        self.dex_items = _datas;
+                    }
+                });
+
+                self.input.clear();
+            } else if self.editing_column.clone().eq("copy")
+                || self.editing_column.clone().eq("del")
+            {
+                self.reset_cursor();
+                self.input_mode = InputMode::Normal;
+                self.show_popup = false;
+
+                // ------- ugly code start
+                block_on(async {
+                    let config: Config = load_config();
+
+                    let db_url = format!(
+                        "mysql://{}:{}@{}:{}/{}",
+                        config.db_user,
+                        config.db_password,
+                        config.db_server,
+                        config.db_port,
+                        config.db_name
+                    );
+                    let db1 = Database::new(&db_url).await.unwrap();
+                    // info!(" self.editing_key : {} ", self.editing_key);
+
+                    // Operate copy work
+                    if self.editing_column.clone().eq("copy") {
+                        info!(" copy record : {:?} ", self.editing_key_value);
+                        db1.copy_dex_record_by_id(&self.editing_key_value)
+                            .await
+                            .unwrap();
+                    } else if self.editing_column.clone().eq("del") {
+                        info!(" delete record : {:?} ", self.editing_key_value);
+                        db1.delete_dex_record_by_id(&self.editing_key_value)
+                            .await
+                            .unwrap();
+                    }
+
+                    let dex_tasks = db1
+                        .get_all_dex_volume_task(&self.search_word)
+                        .await
+                        .unwrap();
+                    let mut _datas: Vec<DexVolumeTask> = vec![];
+                    // let mut array = GLOBAL_ARRAY.lock().unwrap();
+                    for _temp in dex_tasks {
+                        _datas.push(_temp);
+                    }
+
+                    self.dex_items = _datas;
+                });
+
+                self.input.clear();
+            }
         }
     }
 
@@ -603,11 +1105,20 @@ impl App {
     }
 
     fn byte_index(&self) -> usize {
-        self.input
-            .char_indices()
-            .map(|(i, _)| i)
-            .nth(self.character_index)
-            .unwrap_or(self.input.len())
+        match self.focus_area {
+            FocusArea::Upper => self
+                .search_word
+                .char_indices()
+                .map(|(i, _)| i)
+                .nth(self.search_word_character_index)
+                .unwrap_or(self.search_word.len()),
+            FocusArea::Lower => self
+                .input
+                .char_indices()
+                .map(|(i, _)| i)
+                .nth(self.character_index)
+                .unwrap_or(self.input.len()),
+        }
     }
 
     fn delete_char(&mut self) {
@@ -633,205 +1144,336 @@ impl App {
     }
 
     fn clamp_cursor(&self, new_cursor_pos: usize) -> usize {
-        new_cursor_pos.clamp(0, self.input.chars().count())
+        // new_cursor_pos.clamp(0, self.input.chars().count())
+
+        match self.focus_area {
+            FocusArea::Upper => new_cursor_pos.clamp(0, self.search_word.chars().count()),
+            FocusArea::Lower => new_cursor_pos.clamp(0, self.input.chars().count()),
+        }
     }
 
     fn move_cursor_left(&mut self) {
-        let cursor_moved_left = self.character_index.saturating_sub(1);
-        self.character_index = self.clamp_cursor(cursor_moved_left);
+        match self.focus_area {
+            FocusArea::Upper => {
+                let cursor_moved_left = self.search_word_character_index.saturating_sub(1);
+                self.search_word_character_index = self.clamp_cursor(cursor_moved_left);
+            }
+            FocusArea::Lower => {
+                let cursor_moved_left = self.character_index.saturating_sub(1);
+                self.character_index = self.clamp_cursor(cursor_moved_left);
+            }
+        }
+        // let cursor_moved_left = self.character_index.saturating_sub(1);
+        // self.character_index = self.clamp_cursor(cursor_moved_left);
     }
 
     fn move_cursor_right(&mut self) {
-        let cursor_moved_right = self.character_index.saturating_add(1);
-        self.character_index = self.clamp_cursor(cursor_moved_right);
+        match self.focus_area {
+            FocusArea::Upper => {
+                let cursor_moved_right = self.search_word_character_index.saturating_add(1);
+                self.search_word_character_index = self.clamp_cursor(cursor_moved_right);
+            }
+            FocusArea::Lower => {
+                let cursor_moved_right = self.character_index.saturating_add(1);
+                self.character_index = self.clamp_cursor(cursor_moved_right);
+            }
+        }
+
+        // let cursor_moved_right = self.character_index.saturating_add(1);
+        // self.character_index = self.clamp_cursor(cursor_moved_right);
     }
 
     fn enter_char(&mut self, new_char: char) {
-        let index = self.byte_index();
-        self.input.insert(index, new_char);
-        self.move_cursor_right();
+        info!("new_char : {}", new_char);
+        match self.focus_area {
+            FocusArea::Upper => {
+                self.search_word.insert(self.byte_index(), new_char);
+                self.move_cursor_right();
+            }
+            FocusArea::Lower => {
+                self.input.insert(self.byte_index(), new_char);
+                self.move_cursor_right();
+            }
+        }
+        // let index = self.byte_index();
+        // self.input.insert(index, new_char);
+        // self.move_cursor_right();
     }
 
     fn get_current_cell_content(&self) -> Option<SelectedCell> {
         let selected_row = self.state.selected()?;
         let selected_column = self.state.selected_column().unwrap_or(0);
 
-        let data = self.items.get(selected_row)?;
+        match self.working_data {
+            WorkingData::Mm => {
+                let data = self.mm_items.get(selected_row)?;
 
-        match selected_column {
-            0 => Some(SelectedCell {
-                key_name: "id".to_string(),
-                key_value: data.id().to_string(),
-                cell_name: "id".to_string(),
-                cell_value: data.id().to_string(),
-            }),
-            1 => Some(SelectedCell {
-                key_name: "id".to_string(),
-                key_value: data.id().to_string(),
-                cell_name: "launch_id".to_string(),
-                cell_value: data.launch_id().to_string(),
-            }),
-            2 => Some(SelectedCell {
-                key_name: "id".to_string(),
-                key_value: data.id().to_string(),
-                cell_name: "token_add".to_string(),
-                cell_value: data.token_add().to_string(),
-            }),
-            3 => Some(SelectedCell {
-                key_name: "id".to_string(),
-                key_value: data.id().to_string(),
-                cell_name: "target_volume".to_string(),
-                cell_value: data.target_volume().to_string(),
-            }),
-            4 => Some(SelectedCell {
-                key_name: "id".to_string(),
-                key_value: data.id().to_string(),
-                cell_name: "do_status".to_string(),
-                cell_value: data.do_status().to_string(),
-            }),
-            5 => Some(SelectedCell {
-                key_name: "id".to_string(),
-                key_value: data.id().to_string(),
-                cell_name: "use_wallet_type".to_string(),
-                cell_value: data.use_wallet_type().to_string(),
-            }),
-            6 => Some(SelectedCell {
-                key_name: "id".to_string(),
-                key_value: data.id().to_string(),
-                cell_name: "remark".to_string(),
-                cell_value: data.remark().to_string(),
-            }),
-            7 => Some(SelectedCell {
-                key_name: "id".to_string(),
-                key_value: data.id().to_string(),
-                cell_name: "buy_rate".to_string(),
-                cell_value: data.buy_rate().to_string(),
-            }),
-            8 => Some(SelectedCell {
-                key_name: "id".to_string(),
-                key_value: data.id().to_string(),
-                cell_name: "buy_per_low".to_string(),
-                cell_value: data.buy_per_low().to_string(),
-            }),
-            9 => Some(SelectedCell {
-                key_name: "id".to_string(),
-                key_value: data.id().to_string(),
-                cell_name: "buy_per_high".to_string(),
-                cell_value: data.buy_per_high().to_string(),
-            }),
-            10 => Some(SelectedCell {
-                key_name: "id".to_string(),
-                key_value: data.id().to_string(),
-                cell_name: "sell_percent".to_string(),
-                cell_value: data.sell_percent().to_string(),
-            }),
-            11 => Some(SelectedCell {
-                key_name: "id".to_string(),
-                key_value: data.id().to_string(),
-                cell_name: "frequent_low".to_string(),
-                cell_value: data.frequent_low().to_string(),
-            }),
-            12 => Some(SelectedCell {
-                key_name: "id".to_string(),
-                key_value: data.id().to_string(),
-                cell_name: "frequent_high".to_string(),
-                cell_value: data.frequent_high().to_string(),
-            }),
-            13 => Some(SelectedCell {
-                key_name: "id".to_string(),
-                key_value: data.id().to_string(),
-                cell_name: "real_sol".to_string(),
-                cell_value: data.real_sol().to_string(),
-            }),
+                match selected_column {
+                    0 => Some(SelectedCell {
+                        key_name: "id".to_string(),
+                        key_value: data.id().to_string(),
+                        cell_name: "id".to_string(),
+                        cell_value: data.id().to_string(),
+                    }),
+                    1 => Some(SelectedCell {
+                        key_name: "id".to_string(),
+                        key_value: data.id().to_string(),
+                        cell_name: "launch_id".to_string(),
+                        cell_value: data.launch_id().to_string(),
+                    }),
+                    2 => Some(SelectedCell {
+                        key_name: "id".to_string(),
+                        key_value: data.id().to_string(),
+                        cell_name: "token_add".to_string(),
+                        cell_value: data.token_add().to_string(),
+                    }),
+                    3 => Some(SelectedCell {
+                        key_name: "id".to_string(),
+                        key_value: data.id().to_string(),
+                        cell_name: "target_volume".to_string(),
+                        cell_value: data.target_volume().to_string(),
+                    }),
+                    4 => Some(SelectedCell {
+                        key_name: "id".to_string(),
+                        key_value: data.id().to_string(),
+                        cell_name: "do_status".to_string(),
+                        cell_value: data.do_status().to_string(),
+                    }),
+                    5 => Some(SelectedCell {
+                        key_name: "id".to_string(),
+                        key_value: data.id().to_string(),
+                        cell_name: "use_wallet_type".to_string(),
+                        cell_value: data.use_wallet_type().to_string(),
+                    }),
+                    6 => Some(SelectedCell {
+                        key_name: "id".to_string(),
+                        key_value: data.id().to_string(),
+                        cell_name: "remark".to_string(),
+                        cell_value: data.remark().to_string(),
+                    }),
+                    7 => Some(SelectedCell {
+                        key_name: "id".to_string(),
+                        key_value: data.id().to_string(),
+                        cell_name: "buy_rate".to_string(),
+                        cell_value: data.buy_rate().to_string(),
+                    }),
+                    8 => Some(SelectedCell {
+                        key_name: "id".to_string(),
+                        key_value: data.id().to_string(),
+                        cell_name: "buy_per_low".to_string(),
+                        cell_value: data.buy_per_low().to_string(),
+                    }),
+                    9 => Some(SelectedCell {
+                        key_name: "id".to_string(),
+                        key_value: data.id().to_string(),
+                        cell_name: "buy_per_high".to_string(),
+                        cell_value: data.buy_per_high().to_string(),
+                    }),
+                    10 => Some(SelectedCell {
+                        key_name: "id".to_string(),
+                        key_value: data.id().to_string(),
+                        cell_name: "sell_percent".to_string(),
+                        cell_value: data.sell_percent().to_string(),
+                    }),
+                    11 => Some(SelectedCell {
+                        key_name: "id".to_string(),
+                        key_value: data.id().to_string(),
+                        cell_name: "frequent_low".to_string(),
+                        cell_value: data.frequent_low().to_string(),
+                    }),
+                    12 => Some(SelectedCell {
+                        key_name: "id".to_string(),
+                        key_value: data.id().to_string(),
+                        cell_name: "frequent_high".to_string(),
+                        cell_value: data.frequent_high().to_string(),
+                    }),
+                    13 => Some(SelectedCell {
+                        key_name: "id".to_string(),
+                        key_value: data.id().to_string(),
+                        cell_name: "real_sol".to_string(),
+                        cell_value: data.real_sol().to_string(),
+                    }),
+                    14 => Some(SelectedCell {
+                        key_name: "id".to_string(),
+                        key_value: data.id().to_string(),
+                        cell_name: "create_time".to_string(),
+                        cell_value: data.create_time.to_string(),
+                    }),
+                    15 => Some(SelectedCell {
+                        key_name: "id".to_string(),
+                        key_value: data.id().to_string(),
+                        cell_name: "update_time".to_string(),
+                        cell_value: data.update_time.to_string(),
+                    }),
+                    16 => Some(SelectedCell {
+                        key_name: "id".to_string(),
+                        key_value: data.id().to_string(),
+                        cell_name: "col1".to_string(),
+                        cell_value: "".to_string(),
+                    }),
+                    17 => Some(SelectedCell {
+                        key_name: "id".to_string(),
+                        key_value: data.id().to_string(),
+                        cell_name: "col2".to_string(),
+                        cell_value: "".to_string(),
+                    }),
+                    18 => Some(SelectedCell {
+                        key_name: "id".to_string(),
+                        key_value: data.id().to_string(),
+                        cell_name: "col3".to_string(),
+                        cell_value: "".to_string(),
+                    }),
 
-            _ => None,
+                    _ => None,
+                }
+            }
+            WorkingData::Dex => {
+                let data = self.dex_items.get(selected_row)?;
+
+                match selected_column {
+                    0 => Some(SelectedCell {
+                        key_name: "id".to_string(),
+                        key_value: data.id().to_string(),
+                        cell_name: "id".to_string(),
+                        cell_value: data.id().to_string(),
+                    }),
+                    1 => Some(SelectedCell {
+                        key_name: "id".to_string(),
+                        key_value: data.id().to_string(),
+                        cell_name: "pool_id".to_string(),
+                        cell_value: data.pool_id().to_string(),
+                    }),
+                    2 => Some(SelectedCell {
+                        key_name: "id".to_string(),
+                        key_value: data.id().to_string(),
+                        cell_name: "token_add".to_string(),
+                        cell_value: data.token_add().to_string(),
+                    }),
+                    3 => Some(SelectedCell {
+                        key_name: "id".to_string(),
+                        key_value: data.id().to_string(),
+                        cell_name: "mm_type".to_string(),
+                        cell_value: data.mm_type().to_string(),
+                    }),
+                    4 => Some(SelectedCell {
+                        key_name: "id".to_string(),
+                        key_value: data.id().to_string(),
+                        cell_name: "remark".to_string(),
+                        cell_value: data.remark().to_string(),
+                    }),
+                    5 => Some(SelectedCell {
+                        key_name: "id".to_string(),
+                        key_value: data.id().to_string(),
+                        cell_name: "target_price".to_string(),
+                        cell_value: data.target_price().to_string(),
+                    }),
+                    6 => Some(SelectedCell {
+                        key_name: "id".to_string(),
+                        key_value: data.id().to_string(),
+                        cell_name: "stop_price_per".to_string(),
+                        cell_value: data.stop_price_per().to_string(),
+                    }),
+                    7 => Some(SelectedCell {
+                        key_name: "id".to_string(),
+                        key_value: data.id().to_string(),
+                        cell_name: "do_status".to_string(),
+                        cell_value: data.do_status().to_string(),
+                    }),
+                    8 => Some(SelectedCell {
+                        key_name: "id".to_string(),
+                        key_value: data.id().to_string(),
+                        cell_name: "buy_rate".to_string(),
+                        cell_value: data.buy_rate().to_string(),
+                    }),
+                    9 => Some(SelectedCell {
+                        key_name: "id".to_string(),
+                        key_value: data.id().to_string(),
+                        cell_name: "buy_per_low".to_string(),
+                        cell_value: data.buy_per_low().to_string(),
+                    }),
+                    10 => Some(SelectedCell {
+                        key_name: "id".to_string(),
+                        key_value: data.id().to_string(),
+                        cell_name: "buy_per_high".to_string(),
+                        cell_value: data.buy_per_high().to_string(),
+                    }),
+                    11 => Some(SelectedCell {
+                        key_name: "id".to_string(),
+                        key_value: data.id().to_string(),
+                        cell_name: "sell_percent".to_string(),
+                        cell_value: data.sell_percent().to_string(),
+                    }),
+                    12 => Some(SelectedCell {
+                        key_name: "id".to_string(),
+                        key_value: data.id().to_string(),
+                        cell_name: "frequent_low".to_string(),
+                        cell_value: data.frequent_low().to_string(),
+                    }),
+                    13 => Some(SelectedCell {
+                        key_name: "id".to_string(),
+                        key_value: data.id().to_string(),
+                        cell_name: "frequent_high".to_string(),
+                        cell_value: data.frequent_high().to_string(),
+                    }),
+                    14 => Some(SelectedCell {
+                        key_name: "id".to_string(),
+                        key_value: data.id().to_string(),
+                        cell_name: "bsdiff".to_string(),
+                        cell_value: data.bsdiff().to_string(),
+                    }),
+                    15 => Some(SelectedCell {
+                        key_name: "id".to_string(),
+                        key_value: data.id().to_string(),
+                        cell_name: "create_time".to_string(),
+                        cell_value: data.create_time().to_string(),
+                    }),
+                    16 => Some(SelectedCell {
+                        key_name: "id".to_string(),
+                        key_value: data.id().to_string(),
+                        cell_name: "update_time".to_string(),
+                        cell_value: data.update_time().to_string(),
+                    }),
+                    17 => Some(SelectedCell {
+                        key_name: "id".to_string(),
+                        key_value: data.id().to_string(),
+                        cell_name: "copy".to_string(),
+                        cell_value: data.copy().to_string(),
+                    }),
+                    18 => Some(SelectedCell {
+                        key_name: "id".to_string(),
+                        key_value: data.id().to_string(),
+                        cell_name: "del".to_string(),
+                        cell_value: data.del().to_string(),
+                    }),
+
+                    _ => None,
+                }
+            }
         }
     }
 
-    // fn run(mut self, mut terminal: DefaultTerminal) -> Result<()> {
-    //     let (tx, mut rx) = mpsc::channel(32);
-
-    //     tokio::spawn(async move {
-    //         loop {
-    //             // // ugly code
-    //             let config: Config = load_config();
-
-    //             let db_url = format!(
-    //                 "mysql://{}:{}@{}:{}/{}",
-    //                 config.db_user,
-    //                 config.db_password,
-    //                 config.db_server,
-    //                 config.db_port,
-    //                 config.db_name
-    //             );
-    //             let db1 = Database::new(&db_url).await.unwrap();
-    //             // ugly code
-
-    //             let users = db1.get_all_users().await.unwrap();
-    //             let mut _datas: Vec<Data> = vec![];
-    //             for _user in users {
-    //                 let _data = Data {
-    //                     key: _user.accountId.to_string(),
-    //                     address: _user.userName.clone(),
-    //                     email: _user.realName.clone(),
-    //                     col2: _user.password.clone(),
-    //                     col3: _user.phoneNumber.clone(),
-    //                 };
-    //                 _datas.push(_data);
-    //             }
-
-    //             let _ = tx.send(_datas).await.unwrap();
-
-    //             sleep(Duration::from_secs(10)).await;
-    //         }
-    //     });
-
-    //     loop {
-    //         terminal.draw(|frame| self.draw(frame))?;
-
-    //         if let Event::Key(key) = event::read()? {
-    //             let shift_pressed = key.modifiers.contains(KeyModifiers::SHIFT);
-
-    //             match self.input_mode {
-    //                 InputMode::Normal => match key.code {
-    //                     KeyCode::Char('q') | KeyCode::Esc => return Ok(()),
-    //                     KeyCode::Char('j') | KeyCode::Down => self.next_row(),
-    //                     KeyCode::Char('k') | KeyCode::Up => self.previous_row(),
-    //                     KeyCode::Char('l') | KeyCode::Right if shift_pressed => self.next_color(),
-    //                     // KeyCode::Char('h') | KeyCode::Left if shift_pressed => {
-    //                     //     self.previous_color();
-    //                     // }
-    //                     KeyCode::Left if shift_pressed => {
-    //                         self.previous_color();
-    //                     }
-    //                     KeyCode::Char('l') | KeyCode::Right => self.next_column(),
-    //                     // KeyCode::Char('h') | KeyCode::Left => self.previous_column(),
-    //                     KeyCode::Left => self.previous_column(),
-    //                     KeyCode::Char('e') | KeyCode::Enter => self.edit_cell(),
-    //                     _ => {}
-    //                 },
-    //                 InputMode::Editing if key.kind == KeyEventKind::Press => match key.code {
-    //                     KeyCode::Enter => self.submit_message(),
-    //                     KeyCode::Char(to_insert) => self.enter_char(to_insert),
-    //                     KeyCode::Backspace => self.delete_char(),
-    //                     KeyCode::Left => self.move_cursor_left(),
-    //                     KeyCode::Right => self.move_cursor_right(),
-    //                     KeyCode::Esc => self.input_mode = InputMode::Normal,
-    //                     _ => {}
-    //                 },
-    //                 _ => {}
-    //             }
-    //         }
-    //     }
-    // }
-
     fn draw(&mut self, frame: &mut Frame) {
-        let vertical = &Layout::vertical([Constraint::Length(4), Constraint::Min(8), Constraint::Length(4)]);
-        let rects = vertical.split(frame.area());
+        let vertical = &Layout::vertical([
+            Constraint::Length(3),
+            Constraint::Min(8),
+            Constraint::Length(4),
+        ]);
+        let rects: std::rc::Rc<[Rect]> = vertical.split(frame.area());
+
+        let header_horizontal = &Layout::horizontal([
+            Constraint::Length(20),
+            Constraint::Length(20),
+            Constraint::Length(20),
+            Constraint::Min(8),
+            Constraint::Length(4),
+        ]);
+
+        let header_rects = header_horizontal.split(rects[0]);
 
         self.set_colors();
 
-        self.render_header(frame, rects[0]);
+        self.render_search_input(frame, header_rects[0]);
+        self.render_header_button1(frame, header_rects[1]);
         self.render_table(frame, rects[1]);
         self.render_scrollbar(frame, rects[1]);
         self.render_footer(frame, rects[2]);
@@ -850,8 +1492,26 @@ impl App {
             // let block = Block::bordered().title("Popup");
             let area = popup_area(area, 40, 20);
             frame.render_widget(Clear, area); //this clears out the background
-                                              // frame.render_widget(block, area);
-            frame.render_widget(input, area);
+
+            // frame.render_widget(block, area);
+
+            if self.focus_area == FocusArea::Lower && self.editing_column == "copy" {
+                let text = "是否复制本行, 确定请按回车, 取消按ESC";
+
+                let paragraph = Paragraph::new(text.white())
+                    .style(Style::default().fg(Color::White))
+                    .block(Block::default().borders(Borders::ALL).title("提示"));
+                frame.render_widget(paragraph, area);
+            } else if self.focus_area == FocusArea::Lower && self.editing_column == "del" {
+                let text = "是否删除本行, 确定请按回车, 取消按ESC";
+
+                let paragraph = Paragraph::new(text.white())
+                    .style(Style::default().fg(Color::White))
+                    .block(Block::default().borders(Borders::ALL).title("提示"));
+                frame.render_widget(paragraph, area);
+            } else {
+                frame.render_widget(input, area);
+            }
 
             match self.input_mode {
                 // Hide the cursor. `Frame` does this by default, so we don't need to do anything here
@@ -883,74 +1543,162 @@ impl App {
             .add_modifier(Modifier::REVERSED)
             .fg(self.colors.selected_cell_style_fg);
 
-        let header = [
-            "id",
-            "launch_id",
-            "token_add",
-            "target_volume",
-            "do_status",
-            "use_wallet_type",
-            "remark",
-            "buy_rate",
-            "buy_per_low",
-            "buy_per_high",
-            "sell_percent",
-            "frequent_low",
-            "frequent_high",
-            "real_sol",
-        ]
+        let header = match self.working_data {
+            WorkingData::Mm => vec![
+                "id",
+                "launch_id",
+                "token_add",
+                "target_volume",
+                "do_status",
+                "use_wallet_type",
+                "remark",
+                "buy_rate",
+                "buy_per_low",
+                "buy_per_high",
+                "sell_percent",
+                "frequent_low",
+                "frequent_high",
+                "real_sol",
+                "create_time",
+                "update_time",
+                "",
+                "",
+                "",
+            ],
+            WorkingData::Dex => vec![
+                "id",
+                "pool_id",
+                "token_add",
+                "mm_type",
+                "remark",
+                "target_price",
+                "stop_price_per",
+                "do_status",
+                "buy_rate",
+                "buy_per_low",
+                "buy_per_high",
+                "sell_percent",
+                "frequent_low",
+                "frequent_high",
+                "bsdiff",
+                "create_time",
+                "update_time",
+                "copy",
+                "del",
+            ],
+        }
         .into_iter()
         .map(Cell::from)
         .collect::<Row>()
         .style(header_style)
         .height(1);
-        let rows = self.items.iter().enumerate().map(|(i, data)| {
-            let color = match i % 2 {
-                0 => self.colors.normal_row_color,
-                _ => self.colors.alt_row_color,
-            };
-            let item = data.ref_array();
-            item.into_iter()
-                .map(|content| Cell::from(Text::from(format!("\n{content}\n"))))
-                .collect::<Row>()
-                .style(Style::new().fg(self.colors.row_fg).bg(color))
-                .height(3)
-        });
+
+        let rows: Vec<Row> = match self.working_data {
+            WorkingData::Mm => self
+                .mm_items
+                .iter()
+                .enumerate()
+                .map(|(i, data)| {
+                    let color = match i % 2 {
+                        0 => self.colors.normal_row_color,
+                        _ => self.colors.alt_row_color,
+                    };
+                    let item = data.ref_array();
+                    item.into_iter()
+                        .map(|content| Cell::from(Text::from(format!("\n{content}\n"))))
+                        .collect::<Row>()
+                        .style(Style::new().fg(self.colors.row_fg).bg(color))
+                        .height(3)
+                })
+                .collect(),
+            WorkingData::Dex => self
+                .dex_items
+                .iter()
+                .enumerate()
+                .map(|(i, data)| {
+                    let color = match i % 2 {
+                        0 => self.colors.normal_row_color,
+                        _ => self.colors.alt_row_color,
+                    };
+                    let item = data.ref_array();
+                    item.into_iter()
+                        .map(|content| Cell::from(Text::from(format!("\n{content}\n"))))
+                        .collect::<Row>()
+                        .style(Style::new().fg(self.colors.row_fg).bg(color))
+                        .height(3)
+                })
+                .collect(),
+        };
+
         let bar = " █ ";
-        let t = Table::new(
-            rows,
-            [
-                // + 1 is for padding.
-                Constraint::Length(self.longest_item_lens.0 + 1),
-                Constraint::Min(self.longest_item_lens.1 + 1),
-                Constraint::Min(self.longest_item_lens.2),
-                Constraint::Min(self.longest_item_lens.0 + 1),
-                Constraint::Min(self.longest_item_lens.0 + 1),
-                Constraint::Min(self.longest_item_lens.0 + 1),
-                Constraint::Min(self.longest_item_lens.0 + 1),
-                Constraint::Min(self.longest_item_lens.0 + 1),
-                Constraint::Min(self.longest_item_lens.0 + 1),
-                Constraint::Min(self.longest_item_lens.0 + 1),
-                Constraint::Min(self.longest_item_lens.0 + 1),
-                Constraint::Min(self.longest_item_lens.0 + 1),
-                Constraint::Min(self.longest_item_lens.0 + 1),
-                Constraint::Min(self.longest_item_lens.0 + 1),
-            ],
-        )
-        .header(header)
-        .row_highlight_style(selected_row_style)
-        .column_highlight_style(selected_col_style)
-        .cell_highlight_style(selected_cell_style)
-        .highlight_symbol(Text::from(vec![
-            // "".into(),
-            bar.into(),
-            bar.into(),
-            bar.into(),
-            // bar.into(),
-            // "".into(),
-        ]))
-        .bg(self.colors.buffer_bg)
-        .highlight_spacing(HighlightSpacing::Always);
+        let width_mm = [
+            // + 1 is for padding.
+            Constraint::Length(self.longest_mm_item_lens.0 + 1),
+            Constraint::Max(self.longest_mm_item_lens.1 + 6),
+            Constraint::Max(self.longest_mm_item_lens.2 + 5),
+            Constraint::Max(self.longest_mm_item_lens.0 + 9),
+            Constraint::Max(self.longest_mm_item_lens.0 + 5),
+            Constraint::Max(self.longest_mm_item_lens.0 + 4),
+            Constraint::Max(self.longest_mm_item_lens.0 + 4),
+            Constraint::Max(self.longest_mm_item_lens.0 + 4),
+            Constraint::Max(self.longest_mm_item_lens.0 + 7),
+            Constraint::Max(self.longest_mm_item_lens.0 + 8),
+            Constraint::Max(self.longest_mm_item_lens.0 + 9),
+            Constraint::Max(self.longest_mm_item_lens.0 + 8),
+            Constraint::Max(self.longest_mm_item_lens.0 + 9),
+            Constraint::Max(self.longest_mm_item_lens.0 + 9),
+            Constraint::Max(self.longest_mm_item_lens.0 + 16),
+            // Constraint::Min(self.longest_mm_item_lens.0 + 1),
+            Constraint::Length(16),
+            Constraint::Length(3),
+            Constraint::Length(3),
+            Constraint::Length(3),
+        ];
+
+        let width_dex = [
+            // + 1 is for padding.
+            Constraint::Length(self.longest_mm_item_lens.0 + 1),
+            Constraint::Max(self.longest_mm_item_lens.1 + 6),
+            Constraint::Max(self.longest_mm_item_lens.2 + 5),
+            Constraint::Max(self.longest_mm_item_lens.0 + 3),
+            Constraint::Max(self.longest_mm_item_lens.0 + 2),
+            Constraint::Max(self.longest_mm_item_lens.0 + 7),
+            Constraint::Max(self.longest_mm_item_lens.0 + 10),
+            Constraint::Max(self.longest_mm_item_lens.0 + 5),
+            Constraint::Max(self.longest_mm_item_lens.0 + 4),
+            Constraint::Max(self.longest_mm_item_lens.0 + 7),
+            Constraint::Max(self.longest_mm_item_lens.0 + 8),
+            Constraint::Max(self.longest_mm_item_lens.0 + 8),
+            Constraint::Max(self.longest_mm_item_lens.0 + 8),
+            Constraint::Max(self.longest_mm_item_lens.0 + 9),
+            Constraint::Max(self.longest_mm_item_lens.0 + 2),
+            // Constraint::Min(self.longest_mm_item_lens.0 + 1),
+            Constraint::Length(16),
+            Constraint::Length(16),
+            Constraint::Length(16),
+            Constraint::Length(16),
+        ];
+
+        let _width = match self.working_data {
+            WorkingData::Mm => width_mm,
+            WorkingData::Dex => width_dex,
+        };
+
+        let t = Table::new(rows, _width)
+            .header(header)
+            .row_highlight_style(selected_row_style)
+            .column_highlight_style(selected_col_style)
+            .cell_highlight_style(selected_cell_style)
+            .highlight_symbol(Text::from(vec![
+                // "".into(),
+                bar.into(),
+                bar.into(),
+                bar.into(),
+                // bar.into(),
+                // "".into(),
+            ]))
+            .highlight_spacing(HighlightSpacing::Always);
+
         frame.render_stateful_widget(t, area, &mut self.state);
     }
 
@@ -984,26 +1732,59 @@ impl App {
         frame.render_widget(info_footer, area);
     }
 
-    fn render_header(&self, frame: &mut Frame, area: Rect) {
-        let info_footer = Paragraph::new(Text::from_iter(INFO_TEXT))
-            .style(
-                Style::new()
-                    .fg(self.colors.row_fg)
-                    .bg(self.colors.buffer_bg),
-            )
-            .centered()
-            .block(
-                Block::bordered()
-                    .border_type(BorderType::Double)
-                    .border_style(Style::new().fg(self.colors.footer_border_color)),
-            );
-        frame.render_widget(info_footer, area);
+    fn get_herder_bg_color(&self, item_index: u8) -> Color {
+        match self.focus_area {
+            FocusArea::Lower => Color::Rgb(0, 0, 0),
+            FocusArea::Upper => {
+                if item_index == self.header_item_selected_index {
+                    // return Color::Rgb(60, 60, 60);
+                    return Color::Gray;
+                } else {
+                    return Color::Rgb(0, 0, 0);
+                }
+            }
+        }
+    }
+
+    fn render_search_input(&self, frame: &mut Frame, area: Rect) {
+        let search_input = Paragraph::new(self.search_word.as_str())
+            .style(match self.input_mode {
+                InputMode::Normal => Style::default(),
+                InputMode::Editing => {
+                    // Style::default().fg(Color::Yellow)
+                    match self.focus_area {
+                        FocusArea::Upper => Style::default().fg(Color::Yellow),
+                        FocusArea::Lower => Style::default(),
+                    }
+                }
+            })
+            .bg(self.get_herder_bg_color(0))
+            .block(Block::bordered().title("Search"));
+
+        frame.render_widget(search_input, area);
+    }
+
+    fn render_header_button1(&self, frame: &mut Frame, area: Rect) {
+        let text: &str = match self.working_data {
+            WorkingData::Mm => "内盘MM",
+            WorkingData::Dex => "外盘DEX",
+        };
+        let button_text_1 = Paragraph::new(text.white()).wrap(Wrap { trim: true });
+        let button_area: Block<'_> = Block::bordered()
+            .bg(self.get_herder_bg_color(1))
+            .padding(Padding::new(1, 1, 0, 0));
+        frame.render_widget(button_text_1.block(button_area), area);
     }
 }
 
-fn constraint_len_calculator(
+fn constraint_mm_len_calculator(
     items: &[MmVolumeTask],
 ) -> (
+    u16,
+    u16,
+    u16,
+    u16,
+    u16,
     u16,
     u16,
     u16,
@@ -1028,7 +1809,7 @@ fn constraint_len_calculator(
     let launch_id_len = items
         .iter()
         .map(MmVolumeTask::launch_id)
-        .flat_map(str::lines)
+        // .flat_map(str::lines)
         .map(UnicodeWidthStr::width)
         .max()
         .unwrap_or(0);
@@ -1104,6 +1885,21 @@ fn constraint_len_calculator(
         .map(UnicodeWidthStr::width)
         .max()
         .unwrap_or(0);
+    let create_time_len = items
+        .iter()
+        .map(MmVolumeTask::create_time)
+        .map(UnicodeWidthStr::width)
+        .max()
+        .unwrap_or(0);
+    let update_time_len = items
+        .iter()
+        .map(MmVolumeTask::update_time)
+        .map(UnicodeWidthStr::width)
+        .max()
+        .unwrap_or(0);
+    let col1_len = 0;
+    let col2_len = 0;
+    let col3_len = 0;
 
     #[allow(clippy::cast_possible_truncation)]
     (
@@ -1121,5 +1917,173 @@ fn constraint_len_calculator(
         frequent_low_len as u16,
         frequent_high_len as u16,
         real_sol_len as u16,
+        create_time_len as u16,
+        update_time_len as u16,
+        col1_len as u16,
+        col2_len as u16,
+        col3_len as u16,
+    )
+}
+
+fn constraint_dex_len_calculator(
+    items: &[DexVolumeTask],
+) -> (
+    u16,
+    u16,
+    u16,
+    u16,
+    u16,
+    u16,
+    u16,
+    u16,
+    u16,
+    u16,
+    u16,
+    u16,
+    u16,
+    u16,
+    u16,
+    u16,
+    u16,
+    u16,
+    u16,
+) {
+    let id_len = items
+        .iter()
+        .map(DexVolumeTask::id)
+        .map(UnicodeWidthStr::width)
+        .max()
+        .unwrap_or(0);
+    let pool_id_len = items
+        .iter()
+        .map(DexVolumeTask::pool_id)
+        .flat_map(str::lines)
+        .map(UnicodeWidthStr::width)
+        .max()
+        .unwrap_or(0);
+    let token_add_len = items
+        .iter()
+        .map(DexVolumeTask::token_add)
+        .map(UnicodeWidthStr::width)
+        .max()
+        .unwrap_or(0);
+    let mm_type_len = items
+        .iter()
+        .map(DexVolumeTask::mm_type)
+        .map(UnicodeWidthStr::width)
+        .max()
+        .unwrap_or(0);
+    let remark_len = items
+        .iter()
+        .map(DexVolumeTask::remark)
+        .map(UnicodeWidthStr::width)
+        .max()
+        .unwrap_or(0);
+    let target_price_len = items
+        .iter()
+        .map(DexVolumeTask::target_price)
+        .map(UnicodeWidthStr::width)
+        .max()
+        .unwrap_or(0);
+    let stop_price_per_len = items
+        .iter()
+        .map(DexVolumeTask::stop_price_per)
+        .map(UnicodeWidthStr::width)
+        .max()
+        .unwrap_or(0);
+    let do_status_len = items
+        .iter()
+        .map(DexVolumeTask::do_status)
+        .map(UnicodeWidthStr::width)
+        .max()
+        .unwrap_or(0);
+    let buy_rate_len = items
+        .iter()
+        .map(DexVolumeTask::buy_rate)
+        .map(UnicodeWidthStr::width)
+        .max()
+        .unwrap_or(0);
+    let buy_per_low_len = items
+        .iter()
+        .map(DexVolumeTask::buy_per_low)
+        .map(UnicodeWidthStr::width)
+        .max()
+        .unwrap_or(0);
+    let buy_per_high_len = items
+        .iter()
+        .map(DexVolumeTask::buy_per_high)
+        .map(UnicodeWidthStr::width)
+        .max()
+        .unwrap_or(0);
+    let sell_percent_len = items
+        .iter()
+        .map(DexVolumeTask::sell_percent)
+        .map(UnicodeWidthStr::width)
+        .max()
+        .unwrap_or(0);
+    let frequent_low_len = items
+        .iter()
+        .map(DexVolumeTask::frequent_low)
+        .map(UnicodeWidthStr::width)
+        .max()
+        .unwrap_or(0);
+    let frequent_high_len = items
+        .iter()
+        .map(DexVolumeTask::frequent_high)
+        .map(UnicodeWidthStr::width)
+        .max()
+        .unwrap_or(0);
+    let bsdiff_len = items
+        .iter()
+        .map(DexVolumeTask::bsdiff)
+        .map(UnicodeWidthStr::width)
+        .max()
+        .unwrap_or(0);
+    let create_time_len = items
+        .iter()
+        .map(DexVolumeTask::create_time)
+        .map(UnicodeWidthStr::width)
+        .max()
+        .unwrap_or(0);
+    let update_time_len = items
+        .iter()
+        .map(DexVolumeTask::update_time)
+        .map(UnicodeWidthStr::width)
+        .max()
+        .unwrap_or(0);
+    let copy_len = items
+        .iter()
+        .map(DexVolumeTask::update_time)
+        .map(UnicodeWidthStr::width)
+        .max()
+        .unwrap_or(0);
+    let del_len = items
+        .iter()
+        .map(DexVolumeTask::update_time)
+        .map(UnicodeWidthStr::width)
+        .max()
+        .unwrap_or(0);
+
+    #[allow(clippy::cast_possible_truncation)]
+    (
+        id_len as u16,
+        pool_id_len as u16,
+        token_add_len as u16,
+        mm_type_len as u16,
+        remark_len as u16,
+        target_price_len as u16,
+        stop_price_per_len as u16,
+        do_status_len as u16,
+        buy_rate_len as u16,
+        buy_per_low_len as u16,
+        buy_per_high_len as u16,
+        sell_percent_len as u16,
+        frequent_low_len as u16,
+        frequent_high_len as u16,
+        bsdiff_len as u16,
+        create_time_len as u16,
+        update_time_len as u16,
+        copy_len as u16,
+        del_len as u16,
     )
 }
